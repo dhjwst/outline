@@ -9,6 +9,7 @@ import {
   subYears,
 } from "date-fns";
 import {
+  ru,
   cs,
   de,
   enUS,
@@ -161,6 +162,7 @@ export function getCurrentDateTimeAsString(locale?: Intl.LocalesArgument) {
 }
 
 const locales = {
+  ru_RU: ru;
   cs_CZ: cs,
   de_DE: de,
   en_US: enUS,

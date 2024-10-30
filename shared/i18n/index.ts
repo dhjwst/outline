@@ -13,6 +13,10 @@ export const languageOptions: LanguageOption[] = [
     value: "en_US",
   },
   {
+    label: "Русский (Russian)",
+    value: "ru_RU",
+  },
+  {
     label: "Čeština (Czech)",
     value: "cs_CZ",
   },
