@@ -6,20 +6,22 @@ import { useHistory, useLocation } from "react-router-dom";
 import scrollIntoView from "scroll-into-view-if-needed";
 import styled, { css } from "styled-components";
 import breakpoint from "styled-components-breakpoint";
-import { s } from "@shared/styles";
+import { s, hover } from "@shared/styles";
 import { ProsemirrorData } from "@shared/types";
+import { ProsemirrorHelper } from "@shared/utils/ProsemirrorHelper";
 import Comment from "~/models/Comment";
 import Document from "~/models/Document";
-import { Avatar, AvatarSize } from "~/components/Avatar";
+import { AvatarSize } from "~/components/Avatar";
 import { useDocumentContext } from "~/components/DocumentContext";
 import Facepile from "~/components/Facepile";
 import Fade from "~/components/Fade";
 import { ResizingHeightContainer } from "~/components/ResizingHeightContainer";
+import useBoolean from "~/hooks/useBoolean";
+import { useLocationSidebarContext } from "~/hooks/useLocationSidebarContext";
 import useOnClickOutside from "~/hooks/useOnClickOutside";
 import usePersistedState from "~/hooks/usePersistedState";
 import usePolicy from "~/hooks/usePolicy";
 import useStores from "~/hooks/useStores";
-import { hover } from "~/styles";
 import { sidebarAppearDuration } from "~/styles/animations";
 import CommentForm from "./CommentForm";
 import CommentThreadItem from "./CommentThreadItem";
@@ -53,7 +55,7 @@ function CommentThread({
   collapseThreshold = 5,
   collapseNumDisplayed = 3,
 }: Props) {
-  const [focusedOnMount] = React.useState(focused);
+  const [scrollOnMount] = React.useState(focused && !window.location.hash);
   const { editor } = useDocumentContext();
   const { comments } = useStores();
   const topRef = React.useRef<HTMLDivElement>(null);
@@ -61,7 +63,8 @@ function CommentThread({
   const { t } = useTranslation();
   const history = useHistory();
   const location = useLocation();
-  const [autoFocus, setAutoFocus] = React.useState(thread.isNew);
+  const sidebarContext = useLocationSidebarContext();
+  const [autoFocus, setAutoFocusOn, setAutoFocusOff] = useBoolean(thread.isNew);
 
   const can = usePolicy(document);
 
@@ -72,10 +75,10 @@ function CommentThread({
 
   const canReply = can.comment && !thread.isResolved;
 
-  const highlightedCommentMarks = editor
-    ?.getComments()
-    .filter((comment) => comment.id === thread.id);
-  const highlightedText = highlightedCommentMarks?.map((c) => c.text).join("");
+  const highlightedText = ProsemirrorHelper.getAnchorTextForComment(
+    editor?.getComments() ?? [],
+    thread.id
+  );
 
   const commentsInThread = comments
     .inThread(thread.id)
@@ -101,7 +104,10 @@ function CommentThread({
       history.replace({
         search: location.search,
         pathname: location.pathname,
-        state: { commentId: undefined },
+        state: {
+          commentId: undefined,
+          sidebarContext,
+        },
       });
     }
   });
@@ -115,7 +121,10 @@ function CommentThread({
       // Clear any commentId from the URL when explicitly focusing a thread
       search: thread.isResolved ? "resolved=" : "",
       pathname: location.pathname.replace(/\/history$/, ""),
-      state: { commentId: thread.id },
+      state: {
+        commentId: thread.id,
+        sidebarContext,
+      },
     });
   };
 
@@ -141,9 +150,6 @@ function CommentThread({
           limit={limit}
           overflow={overflow}
           size={AvatarSize.Medium}
-          renderAvatar={(item) => (
-            <Avatar size={AvatarSize.Medium} model={item} />
-          )}
         />
       </ShowMore>
     );
@@ -151,13 +157,13 @@ function CommentThread({
 
   React.useEffect(() => {
     if (!focused && autoFocus) {
-      setAutoFocus(false);
+      setAutoFocusOff();
     }
-  }, [focused, autoFocus]);
+  }, [focused, autoFocus, setAutoFocusOff]);
 
   React.useEffect(() => {
     if (focused) {
-      if (focusedOnMount) {
+      if (scrollOnMount) {
         setTimeout(() => {
           if (!topRef.current) {
             return;
@@ -201,7 +207,7 @@ function CommentThread({
         isMarkVisible ? 0 : sidebarAppearDuration
       );
     }
-  }, [focused, focusedOnMount, thread.id]);
+  }, [focused, scrollOnMount, thread.id]);
 
   return (
     <Thread
@@ -268,7 +274,7 @@ function CommentThread({
         )}
       </ResizingHeightContainer>
       {!focused && !recessed && !draft && canReply && (
-        <Reply onClick={() => setAutoFocus(true)}>{t("Reply")}…</Reply>
+        <Reply onClick={setAutoFocusOn}>{t("Reply")}…</Reply>
       )}
     </Thread>
   );

@@ -1,5 +1,5 @@
-import invariant from "invariant";
 import { Transaction } from "sequelize";
+import { createContext } from "@server/context";
 import { traceFunction } from "@server/logging/tracing";
 import {
   User,
@@ -10,7 +10,6 @@ import {
   UserMembership,
   GroupMembership,
 } from "@server/models";
-import pinDestroyer from "./pinDestroyer";
 
 type Props = {
   /** User attempting to move the document */
@@ -24,7 +23,7 @@ type Props = {
   /** Position of moved document within document structure */
   index?: number;
   /** The IP address of the user moving the document */
-  ip: string;
+  ip: string | null;
   /** The database transaction to run within */
   transaction?: Transaction;
 };
@@ -66,16 +65,21 @@ async function documentMover({
     result.documents.push(document);
   } else {
     // Load the current and the next collection upfront and lock them
-    const collection = await Collection.findByPk(document.collectionId!, {
-      transaction,
-      lock: Transaction.LOCK.UPDATE,
-      paranoid: false,
-    });
+    const collection = await Collection.scope("withDocumentStructure").findByPk(
+      document.collectionId!,
+      {
+        transaction,
+        lock: Transaction.LOCK.UPDATE,
+        paranoid: false,
+      }
+    );
 
     let newCollection = collection;
     if (collectionChanged) {
       if (collectionId) {
-        newCollection = await Collection.findByPk(collectionId, {
+        newCollection = await Collection.scope(
+          "withDocumentStructure"
+        ).findByPk(collectionId, {
           transaction,
           lock: Transaction.LOCK.UPDATE,
         });
@@ -144,12 +148,14 @@ async function documentMover({
 
       if (collectionId) {
         // Reload the collection to get relationship data
-        newCollection = await Collection.scope({
-          method: ["withMembership", user.id],
-        }).findByPk(collectionId, {
+        newCollection = await Collection.scope([
+          {
+            method: ["withMembership", user.id],
+          },
+        ]).findByPk(collectionId, {
           transaction,
+          rejectOnEmpty: true,
         });
-        invariant(newCollection, "Collection not found");
 
         result.collections.push(newCollection);
 
@@ -213,14 +219,13 @@ async function documentMover({
         lock: Transaction.LOCK.UPDATE,
       });
 
-      if (pin) {
-        await pinDestroyer({
+      await pin?.destroyWithCtx(
+        createContext({
           user,
-          pin,
           ip,
           transaction,
-        });
-      }
+        })
+      );
     }
   }
 

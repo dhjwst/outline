@@ -38,6 +38,7 @@ export default async function userSuspender({
       userId: user.id,
     },
     transaction,
+    individualHooks: true,
   });
   await Event.create(
     {
@@ -55,5 +56,5 @@ export default async function userSuspender({
     }
   );
 
-  await CleanupDemotedUserTask.schedule({ userId: user.id });
+  await new CleanupDemotedUserTask().schedule({ userId: user.id });
 }

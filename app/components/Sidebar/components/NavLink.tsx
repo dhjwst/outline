@@ -39,6 +39,7 @@ export interface Props extends React.AnchorHTMLAttributes<HTMLAnchorElement> {
   location?: Location;
   strict?: boolean;
   to: LocationDescriptor;
+  component?: React.ComponentType;
   onBeforeClick?: () => void;
 }
 
@@ -93,15 +94,11 @@ const NavLink = ({
 
   React.useLayoutEffect(() => {
     if (isActive && linkRef.current && scrollIntoViewIfNeeded !== false) {
-      // If the page has an anchor hash then this means we're linking to an
-      // anchor in the document – smooth scrolling the sidebar may the scrolling
-      // to the anchor of the document so we must avoid it.
-      if (!window.location.hash) {
-        scrollIntoView(linkRef.current, {
-          scrollMode: "if-needed",
-          behavior: "auto",
-        });
-      }
+      scrollIntoView(linkRef.current, {
+        scrollMode: "if-needed",
+        behavior: "auto",
+        boundary: (parent) => parent.id !== "sidebar",
+      });
     }
   }, [linkRef, scrollIntoViewIfNeeded, isActive]);
 
@@ -150,17 +147,22 @@ const NavLink = ({
     setPreActive(undefined);
   }, [currentLocation]);
 
+  const handleKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLAnchorElement>) => {
+      if (["Enter", " "].includes(event.key)) {
+        navigateTo();
+        event.currentTarget?.blur();
+      }
+    },
+    [navigateTo]
+  );
+
   return (
     <Link
       key={isActive ? "active" : "inactive"}
       ref={linkRef}
       onClick={handleClick}
-      onKeyDown={(event) => {
-        if (["Enter", " "].includes(event.key)) {
-          navigateTo();
-          event.currentTarget?.blur();
-        }
-      }}
+      onKeyDown={handleKeyDown}
       aria-current={(isActive && ariaCurrent) || undefined}
       className={className}
       style={style}

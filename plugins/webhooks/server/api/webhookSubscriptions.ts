@@ -5,10 +5,10 @@ import { UserRole } from "@shared/types";
 import auth from "@server/middlewares/authentication";
 import { transaction } from "@server/middlewares/transaction";
 import validate from "@server/middlewares/validate";
-import { WebhookSubscription, Event } from "@server/models";
+import { WebhookSubscription } from "@server/models";
 import { authorize } from "@server/policies";
 import pagination from "@server/routes/api/middlewares/pagination";
-import { APIContext } from "@server/types";
+import { APIContext, AuthenticationType } from "@server/types";
 import presentWebhookSubscription from "../presenters/webhookSubscription";
 import * as T from "./schema";
 
@@ -20,7 +20,9 @@ router.post(
   pagination(),
   async (ctx: APIContext) => {
     const { user } = ctx.state.auth;
+
     authorize(user, "listWebhookSubscription", user.team);
+
     const webhooks = await WebhookSubscription.findAll({
       where: {
         teamId: user.teamId,
@@ -39,38 +41,26 @@ router.post(
 
 router.post(
   "webhookSubscriptions.create",
-  auth({ role: UserRole.Admin }),
+  auth({
+    role: UserRole.Admin,
+    type: [AuthenticationType.API, AuthenticationType.APP],
+  }),
   validate(T.WebhookSubscriptionsCreateSchema),
   transaction(),
   async (ctx: APIContext<T.WebhookSubscriptionsCreateReq>) => {
-    const { transaction } = ctx.state;
+    const { name, url, secret, events } = ctx.input.body;
     const { user } = ctx.state.auth;
+
     authorize(user, "createWebhookSubscription", user.team);
 
-    const { name, url, secret } = ctx.input.body;
-    const events: string[] = compact(ctx.input.body.events);
-
-    const webhookSubscription = await WebhookSubscription.create(
-      {
-        name,
-        events,
-        createdById: user.id,
-        teamId: user.teamId,
-        url,
-        enabled: true,
-        secret: isEmpty(secret) ? undefined : secret,
-      },
-      { transaction }
-    );
-
-    await Event.createFromContext(ctx, {
-      name: "webhookSubscriptions.create",
-      modelId: webhookSubscription.id,
-      data: {
-        name,
-        url,
-        events,
-      },
+    const webhookSubscription = await WebhookSubscription.createWithCtx(ctx, {
+      name,
+      url,
+      events: compact(events),
+      enabled: true,
+      secret: isEmpty(secret) ? undefined : secret,
+      createdById: user.id,
+      teamId: user.teamId,
     });
 
     ctx.body = {
@@ -81,13 +71,17 @@ router.post(
 
 router.post(
   "webhookSubscriptions.delete",
-  auth({ role: UserRole.Admin }),
+  auth({
+    role: UserRole.Admin,
+    type: [AuthenticationType.API, AuthenticationType.APP],
+  }),
   validate(T.WebhookSubscriptionsDeleteSchema),
   transaction(),
   async (ctx: APIContext<T.WebhookSubscriptionsDeleteReq>) => {
     const { id } = ctx.input.body;
     const { user } = ctx.state.auth;
     const { transaction } = ctx.state;
+
     const webhookSubscription = await WebhookSubscription.findByPk(id, {
       rejectOnEmpty: true,
       lock: transaction.LOCK.UPDATE,
@@ -96,17 +90,7 @@ router.post(
 
     authorize(user, "delete", webhookSubscription);
 
-    await webhookSubscription.destroy({ transaction });
-
-    await Event.createFromContext(ctx, {
-      name: "webhookSubscriptions.delete",
-      modelId: webhookSubscription.id,
-      data: {
-        name: webhookSubscription.name,
-        url: webhookSubscription.url,
-        events: webhookSubscription.events,
-      },
-    });
+    await webhookSubscription.destroyWithCtx(ctx);
 
     ctx.body = {
       success: true,
@@ -116,14 +100,17 @@ router.post(
 
 router.post(
   "webhookSubscriptions.update",
-  auth({ role: UserRole.Admin }),
+  auth({
+    role: UserRole.Admin,
+    type: [AuthenticationType.API, AuthenticationType.APP],
+  }),
   validate(T.WebhookSubscriptionsUpdateSchema),
   transaction(),
   async (ctx: APIContext<T.WebhookSubscriptionsUpdateReq>) => {
-    const { id, name, url, secret } = ctx.input.body;
+    const { id, name, url, secret, events } = ctx.input.body;
     const { user } = ctx.state.auth;
     const { transaction } = ctx.state;
-    const events: string[] = compact(ctx.input.body.events);
+
     const webhookSubscription = await WebhookSubscription.findByPk(id, {
       rejectOnEmpty: true,
       lock: transaction.LOCK.UPDATE,
@@ -132,25 +119,12 @@ router.post(
 
     authorize(user, "update", webhookSubscription);
 
-    await webhookSubscription.update(
-      {
-        name,
-        url,
-        events,
-        enabled: true,
-        secret: isEmpty(secret) ? undefined : secret,
-      },
-      { transaction }
-    );
-
-    await Event.createFromContext(ctx, {
-      name: "webhookSubscriptions.update",
-      modelId: webhookSubscription.id,
-      data: {
-        name: webhookSubscription.name,
-        url: webhookSubscription.url,
-        events: webhookSubscription.events,
-      },
+    await webhookSubscription.updateWithCtx(ctx, {
+      name,
+      url,
+      events: compact(events),
+      enabled: true,
+      secret: isEmpty(secret) ? undefined : secret,
     });
 
     ctx.body = {

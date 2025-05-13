@@ -2,15 +2,18 @@ import fs from "fs";
 import path from "path";
 import react from "@vitejs/plugin-react";
 import browserslistToEsbuild from "browserslist-to-esbuild";
-import { webpackStats } from "rollup-plugin-webpack-stats";
-import { CommonServerOptions, defineConfig } from "vite";
+import webpackStats from "rollup-plugin-webpack-stats";
+import { ServerOptions, defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 import environment from "./server/utils/environment";
 
-let httpsConfig: CommonServerOptions["https"] | undefined;
+let httpsConfig: ServerOptions["https"] | undefined;
+let host: string | undefined;
 
 if (environment.NODE_ENV === "development") {
+  host = host = new URL(environment.URL!).hostname;
+
   try {
     httpsConfig = {
       key: fs.readFileSync("./server/config/certs/private.key"),
@@ -31,6 +34,8 @@ export default () =>
       port: 3001,
       host: true,
       https: httpsConfig,
+      allowedHosts: host ? [host] : undefined,
+      cors: true,
       fs:
         environment.NODE_ENV === "development"
           ? {
@@ -89,6 +94,9 @@ export default () =>
           modifyURLPrefix: {
             "": `${environment.CDN_URL ?? ""}/static/`,
           },
+          skipWaiting: true,
+          clientsClaim: true,
+          cleanupOutdatedCaches: true,
           runtimeCaching: [
             {
               urlPattern: /api\/urls\.unfurl$/,
@@ -101,6 +109,34 @@ export default () =>
                 },
                 cacheableResponse: {
                   statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /api\/attachments\.redirect/,
+              handler: "CacheFirst",
+              options: {
+                cacheName: "attachments-redirect-cache",
+                expiration: {
+                  maxEntries: 100,
+                  maxAgeSeconds: 120, // 120 seconds
+                },
+                cacheableResponse: {
+                  statuses: [0, 200, 302], // Include redirects
+                },
+              },
+            },
+            {
+              urlPattern: /api\/files\.get/,
+              handler: "CacheFirst",
+              options: {
+                cacheName: "files-cache",
+                expiration: {
+                  maxEntries: 50,
+                  maxAgeSeconds: 604800, // 7 days
+                },
+                cacheableResponse: {
+                  statuses: [0, 200, 206], // Include partial content for range requests
                 },
               },
             },
@@ -140,6 +176,7 @@ export default () =>
         },
       }),
       // Generate a stats.json file for webpack that will be consumed by RelativeCI
+      // @ts-expect-error Type mismatch with latest versions but Plugin runs without issue
       webpackStats(),
     ],
     optimizeDeps: {
@@ -170,6 +207,13 @@ export default () =>
         keep_fnames: true,
       },
       rollupOptions: {
+        onwarn(warning, warn) {
+          // Suppress noisy warnings about module-level directives, e.g. "use client"
+          if (warning.code === "MODULE_LEVEL_DIRECTIVE") {
+            return;
+          }
+          warn(warning);
+        },
         input: {
           index: "./app/index.tsx",
         },

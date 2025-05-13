@@ -192,7 +192,7 @@ describe("userProvisioner", () => {
 
   it("should prefer isAdmin argument over defaultUserRole", async () => {
     const team = await buildTeam({
-      defaultUserRole: "viewer",
+      defaultUserRole: UserRole.Viewer,
     });
     const authenticationProviders = await team.$get("authenticationProviders");
     const authenticationProvider = authenticationProviders[0];
@@ -437,7 +437,7 @@ describe("userProvisioner", () => {
     }
 
     expect(error && error.toString()).toContain(
-      "The domain is not allowed for this team"
+      "The domain is not allowed for this workspace"
     );
   });
 });

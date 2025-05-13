@@ -10,13 +10,12 @@ import type {
   SaveOptions,
 } from "sequelize";
 import {
-  Sequelize,
   Transaction,
   Op,
   FindOptions,
-  ScopeOptions,
   WhereOptions,
   EmptyResultError,
+  Sequelize,
 } from "sequelize";
 import {
   ForeignKey,
@@ -58,6 +57,7 @@ import FileOperation from "./FileOperation";
 import Group from "./Group";
 import GroupMembership from "./GroupMembership";
 import GroupUser from "./GroupUser";
+import Import from "./Import";
 import Revision from "./Revision";
 import Star from "./Star";
 import Team from "./Team";
@@ -72,12 +72,20 @@ import Length from "./validators/Length";
 
 export const DOCUMENT_VERSION = 2;
 
+// If content (JSON) is null then we still need to return the state column (BINARY)
+// as it's used as a fallback for content deserialization for older documents.
+// This can be removed if content is 100% backfilled.
+const stateIfContentEmpty = Sequelize.literal(
+  `CASE WHEN document.content IS NULL THEN document.state ELSE NULL END AS state`
+);
+
 type AdditionalFindOptions = {
   userId?: string;
   includeState?: boolean;
   rejectOnEmpty?: boolean | Error;
 };
 
+// @ts-expect-error Type 'Literal' is not assignable to type 'string | ProjectionAlias'.
 @DefaultScope(() => ({
   include: [
     {
@@ -101,25 +109,15 @@ type AdditionalFindOptions = {
       },
     },
   },
+  attributes: {
+    include: [stateIfContentEmpty],
+  },
 }))
+// @ts-expect-error Type 'Literal' is not assignable to type 'string | ProjectionAlias'.
 @Scopes(() => ({
-  withCollectionPermissions: (userId: string, paranoid = true) => ({
-    include: [
-      {
-        attributes: ["id", "permission", "sharing", "teamId", "deletedAt"],
-        model: userId
-          ? Collection.scope({
-              method: ["withMembership", userId],
-            })
-          : Collection,
-        as: "collection",
-        paranoid,
-      },
-    ],
-  }),
   withoutState: {
     attributes: {
-      exclude: ["state"],
+      include: [stateIfContentEmpty],
     },
   },
   withCollection: {
@@ -130,21 +128,10 @@ type AdditionalFindOptions = {
       },
     ],
   },
-  withStateIsEmpty: {
-    attributes: {
-      exclude: ["state"],
-      include: [
-        [
-          Sequelize.literal(`CASE WHEN state IS NULL THEN true ELSE false END`),
-          "stateIsEmpty",
-        ],
-      ],
-    },
-  },
   withState: {
     attributes: {
       // resets to include the state column
-      exclude: [],
+      include: [],
     },
   },
   withDrafts: {
@@ -177,13 +164,25 @@ type AdditionalFindOptions = {
       ],
     };
   },
-  withMembership: (userId: string) => {
+  withMembership: (userId: string, paranoid = true) => {
     if (!userId) {
       return {};
     }
 
     return {
       include: [
+        {
+          model: userId
+            ? Collection.scope([
+                "defaultScope",
+                {
+                  method: ["withMembership", userId],
+                },
+              ])
+            : Collection,
+          as: "collection",
+          paranoid,
+        },
         {
           association: "memberships",
           where: {
@@ -427,10 +426,13 @@ class Document extends ArchivableModel<
       return;
     }
 
-    const collection = await Collection.findByPk(model.collectionId, {
-      transaction,
-      lock: Transaction.LOCK.UPDATE,
-    });
+    const collection = await Collection.scope("withDocumentStructure").findByPk(
+      model.collectionId,
+      {
+        transaction,
+        lock: Transaction.LOCK.UPDATE,
+      }
+    );
     if (!collection) {
       return;
     }
@@ -451,7 +453,9 @@ class Document extends ArchivableModel<
     }
 
     return this.sequelize!.transaction(async (transaction: Transaction) => {
-      const collection = await Collection.findByPk(model.collectionId!, {
+      const collection = await Collection.scope(
+        "withDocumentStructure"
+      ).findByPk(model.collectionId!, {
         transaction,
         lock: transaction.LOCK.UPDATE,
       });
@@ -546,6 +550,13 @@ class Document extends ArchivableModel<
   @Column(DataType.UUID)
   importId: string | null;
 
+  @BelongsTo(() => Import, "apiImportId")
+  apiImport: Import<any> | null;
+
+  @ForeignKey(() => Import)
+  @Column(DataType.UUID)
+  apiImportId: string | null;
+
   @AllowNull
   @Column(DataType.JSONB)
   sourceMetadata: SourceMetadata | null;
@@ -638,21 +649,19 @@ class Document extends ArchivableModel<
     return uniq(membershipUserIds);
   }
 
-  static defaultScopeWithUser(userId: string) {
-    const collectionScope: Readonly<ScopeOptions> = {
-      method: ["withCollectionPermissions", userId],
-    };
-    const viewScope: Readonly<ScopeOptions> = {
-      method: ["withViews", userId],
-    };
-    const membershipScope: Readonly<ScopeOptions> = {
-      method: ["withMembership", userId],
-    };
+  static withMembershipScope(
+    userId: string,
+    options?: FindOptions<Document> & { includeDrafts?: boolean }
+  ) {
     return this.scope([
-      "defaultScope",
-      collectionScope,
-      viewScope,
-      membershipScope,
+      options?.includeDrafts ? "withDrafts" : "defaultScope",
+      "withoutState",
+      {
+        method: ["withViews", userId],
+      },
+      {
+        method: ["withMembership", userId, options?.paranoid],
+      },
     ]);
   }
 
@@ -686,14 +695,12 @@ class Document extends ArchivableModel<
     // almost every endpoint needs the collection membership to determine policy permissions.
     const scope = this.scope([
       "withDrafts",
-      {
-        method: ["withCollectionPermissions", userId, rest.paranoid],
-      },
+      options.includeState ? "withState" : "withoutState",
       {
         method: ["withViews", userId],
       },
       {
-        method: ["withMembership", userId],
+        method: ["withMembership", userId, rest.paranoid],
       },
     ]);
 
@@ -751,9 +758,6 @@ class Document extends ArchivableModel<
     const user = userId ? await User.findByPk(userId) : null;
     const documents = await this.scope([
       "withDrafts",
-      {
-        method: ["withCollectionPermissions", userId, rest.paranoid],
-      },
       {
         method: ["withViews", userId],
       },
@@ -839,7 +843,9 @@ class Document extends ArchivableModel<
     }
 
     this.content = revision.content;
-    this.text = revision.text;
+    this.text = DocumentHelper.toMarkdown(revision, {
+      includeTitle: false,
+    });
     this.title = revision.title;
     this.icon = revision.icon;
     this.color = revision.color;
@@ -937,7 +943,9 @@ class Document extends ArchivableModel<
     }
 
     if (!this.template && this.collectionId) {
-      const collection = await Collection.findByPk(this.collectionId, {
+      const collection = await Collection.scope(
+        "withDocumentStructure"
+      ).findByPk(this.collectionId, {
         transaction,
         lock: Transaction.LOCK.UPDATE,
       });
@@ -990,7 +998,13 @@ class Document extends ArchivableModel<
     return false;
   };
 
-  unpublish = async (user: User) => {
+  /**
+   *
+   * @param user User who is performing the action
+   * @param options.detach Whether to detach the document from the containing collection
+   * @returns Updated document
+   */
+  unpublish = async (user: User, options: { detach: boolean }) => {
     // If the document is already a draft then calling unpublish should act like save
     if (!this.publishedAt) {
       return this.save();
@@ -998,10 +1012,13 @@ class Document extends ArchivableModel<
 
     await this.sequelize.transaction(async (transaction: Transaction) => {
       const collection = this.collectionId
-        ? await Collection.findByPk(this.collectionId, {
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-          })
+        ? await Collection.scope("withDocumentStructure").findByPk(
+            this.collectionId,
+            {
+              transaction,
+              lock: transaction.LOCK.UPDATE,
+            }
+          )
         : undefined;
 
       if (collection) {
@@ -1019,6 +1036,11 @@ class Document extends ArchivableModel<
     this.createdBy = user;
     this.updatedBy = user;
     this.publishedAt = null;
+
+    if (options.detach) {
+      this.collectionId = null;
+    }
+
     return this.save();
   };
 
@@ -1027,10 +1049,13 @@ class Document extends ArchivableModel<
   archive = async (user: User, options?: FindOptions) => {
     const { transaction } = { ...options };
     const collection = this.collectionId
-      ? await Collection.findByPk(this.collectionId, {
-          transaction,
-          lock: transaction?.LOCK.UPDATE,
-        })
+      ? await Collection.scope("withDocumentStructure").findByPk(
+          this.collectionId,
+          {
+            transaction,
+            lock: transaction?.LOCK.UPDATE,
+          }
+        )
       : undefined;
 
     if (collection) {
@@ -1051,7 +1076,7 @@ class Document extends ArchivableModel<
   ) => {
     const { transaction } = { ...options };
     const collection = collectionId
-      ? await Collection.findByPk(collectionId, {
+      ? await Collection.scope("withDocumentStructure").findByPk(collectionId, {
           transaction,
           lock: transaction?.LOCK.UPDATE,
         })
@@ -1100,18 +1125,28 @@ class Document extends ArchivableModel<
   // Delete a document, archived or otherwise.
   delete = (user: User) =>
     this.sequelize.transaction(async (transaction: Transaction) => {
-      if (!this.archivedAt && !this.template && this.collectionId) {
-        // delete any children and remove from the document structure
-        const collection = await Collection.findByPk(this.collectionId, {
+      let deleted = false;
+
+      if (!this.template && this.collectionId) {
+        const collection = await Collection.scope(
+          "withDocumentStructure"
+        ).findByPk(this.collectionId!, {
           transaction,
           lock: transaction.LOCK.UPDATE,
           paranoid: false,
         });
-        await collection?.deleteDocument(this, { transaction });
-      } else {
+
+        if (!this.archivedAt || (this.archivedAt && collection?.archivedAt)) {
+          await collection?.deleteDocument(this, { transaction });
+          deleted = true;
+        }
+      }
+
+      if (!deleted) {
         await this.destroy({
           transaction,
         });
+        deleted = true;
       }
 
       this.lastModifiedById = user.id;
@@ -1150,30 +1185,27 @@ class Document extends ArchivableModel<
     // Checking if the record is new is a performance optimization – new docs cannot have children
     const childDocuments = this.isNewRecord
       ? []
-      : await (this.constructor as typeof Document)
-          .unscoped()
-          .scope("withoutState")
-          .findAll({
-            where: options?.includeArchived
-              ? {
-                  teamId: this.teamId,
-                  parentDocumentId: this.id,
-                  publishedAt: {
-                    [Op.ne]: null,
-                  },
-                }
-              : {
-                  teamId: this.teamId,
-                  parentDocumentId: this.id,
-                  publishedAt: {
-                    [Op.ne]: null,
-                  },
-                  archivedAt: {
-                    [Op.is]: null,
-                  },
+      : await (this.constructor as typeof Document).unscoped().findAll({
+          where: options?.includeArchived
+            ? {
+                teamId: this.teamId,
+                parentDocumentId: this.id,
+                publishedAt: {
+                  [Op.ne]: null,
                 },
-            transaction: options?.transaction,
-          });
+              }
+            : {
+                teamId: this.teamId,
+                parentDocumentId: this.id,
+                publishedAt: {
+                  [Op.ne]: null,
+                },
+                archivedAt: {
+                  [Op.is]: null,
+                },
+              },
+          transaction: options?.transaction,
+        });
 
     const children = await Promise.all(
       childDocuments.map((child) => child.toNavigationNode(options))

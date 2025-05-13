@@ -2,6 +2,7 @@
 import crypto from "crypto";
 import { Server } from "https";
 import Koa from "koa";
+import compress from "koa-compress";
 import {
   contentSecurityPolicy,
   dnsPrefetchControl,
@@ -21,6 +22,7 @@ import { initI18n } from "@server/utils/i18n";
 import routes from "../routes";
 import api from "../routes/api";
 import auth from "../routes/auth";
+import oauth from "../routes/oauth";
 
 // Construct scripts CSP based on services in use by this installation
 const defaultSrc = ["'self'"];
@@ -72,6 +74,9 @@ export default function init(app: Koa = new Koa(), server?: Server) {
     app.proxy = true;
   }
 
+  app.use(compress());
+
+  app.use(mount("/oauth", oauth));
   app.use(mount("/auth", auth));
   app.use(mount("/api", api));
 

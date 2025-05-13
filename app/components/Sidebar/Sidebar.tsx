@@ -17,6 +17,7 @@ import { fadeIn } from "~/styles/animations";
 import Desktop from "~/utils/Desktop";
 import NotificationIcon from "../Notifications/NotificationIcon";
 import NotificationsPopover from "../Notifications/NotificationsPopover";
+import { TooltipProvider } from "../TooltipContext";
 import ResizeBorder from "./components/ResizeBorder";
 import SidebarButton, { SidebarButtonProps } from "./components/SidebarButton";
 import ToggleButton from "./components/ToggleButton";
@@ -52,6 +53,8 @@ const Sidebar = React.forwardRef<HTMLDivElement, Props>(function _Sidebar(
   const [isResizing, setResizing] = React.useState(false);
   const [hasPointerMoved, setPointerMoved] = React.useState(false);
   const isSmallerThanMinimum = width < minWidth;
+
+  const hoverTimeoutRef = React.useRef<NodeJS.Timeout | null>(null);
 
   const handleDrag = React.useCallback(
     (event: MouseEvent) => {
@@ -113,6 +116,10 @@ const Sidebar = React.forwardRef<HTMLDivElement, Props>(function _Sidebar(
 
   const handlePointerActivity = React.useCallback(() => {
     if (ui.sidebarIsClosed) {
+      // clear the timeout when mouse exits
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current);
+      }
       setHovering(document.hasFocus());
       setPointerMoved(true);
     }
@@ -121,12 +128,20 @@ const Sidebar = React.forwardRef<HTMLDivElement, Props>(function _Sidebar(
   const handlePointerLeave = React.useCallback(
     (ev) => {
       if (hasPointerMoved) {
-        setHovering(
-          document.hasFocus() &&
-            ev.pageX < width &&
-            ev.pageY < window.innerHeight &&
-            ev.pageY > 0
-        );
+        // clear any previous timeout
+        if (hoverTimeoutRef.current) {
+          clearTimeout(hoverTimeoutRef.current);
+        }
+
+        // add a short delay when mouse exits the sidebar before closing
+        hoverTimeoutRef.current = setTimeout(() => {
+          setHovering(
+            document.hasFocus() &&
+              ev.pageX < width &&
+              ev.pageY < window.innerHeight &&
+              ev.pageY > 0
+          );
+        }, 500);
       }
     },
     [width, hasPointerMoved]
@@ -194,8 +209,9 @@ const Sidebar = React.forwardRef<HTMLDivElement, Props>(function _Sidebar(
   );
 
   return (
-    <>
+    <TooltipProvider>
       <Container
+        id="sidebar"
         ref={ref}
         style={style}
         $hidden={hidden}
@@ -226,7 +242,6 @@ const Sidebar = React.forwardRef<HTMLDivElement, Props>(function _Sidebar(
                     alt={user.name}
                     model={user}
                     size={24}
-                    showBorder={false}
                     style={{ marginLeft: 4 }}
                   />
                 }
@@ -242,7 +257,7 @@ const Sidebar = React.forwardRef<HTMLDivElement, Props>(function _Sidebar(
         />
       </Container>
       {ui.mobileSidebarVisible && <Backdrop onClick={ui.toggleMobileSidebar} />}
-    </>
+    </TooltipProvider>
   );
 });
 
@@ -306,6 +321,7 @@ const Container = styled(Flex)<ContainerProps>`
   z-index: ${depths.mobileSidebar};
   max-width: 80%;
   min-width: 280px;
+  padding-left: var(--sal);
   ${fadeOnDesktopBackgrounded()}
 
   @media print {

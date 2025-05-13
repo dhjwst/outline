@@ -8,6 +8,7 @@ type DialogDefinition = {
   isOpen: boolean;
   fullscreen?: boolean;
   style?: React.CSSProperties;
+  onClose?: () => void;
 };
 
 export default class DialogsStore {
@@ -44,32 +45,35 @@ export default class DialogsStore {
   };
 
   openModal = ({
+    id,
     title,
     content,
     fullscreen,
     replace,
     style,
+    onClose,
   }: {
+    id?: string;
     title: string;
     fullscreen?: boolean;
     content: React.ReactNode;
     style?: React.CSSProperties;
     replace?: boolean;
+    onClose?: () => void;
   }) => {
     setTimeout(
       action(() => {
-        const id = uuidv4();
-
         if (replace) {
           this.modalStack.clear();
         }
 
-        this.modalStack.set(id, {
+        this.modalStack.set(id ?? uuidv4(), {
           title,
           content,
           fullscreen,
           style,
           isOpen: true,
+          onClose,
         });
       }),
       0

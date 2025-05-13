@@ -1,20 +1,20 @@
 import { JSDOM } from "jsdom";
 import compact from "lodash/compact";
 import flatten from "lodash/flatten";
-import isEqual from "lodash/isEqual";
+import isMatch from "lodash/isMatch";
 import uniq from "lodash/uniq";
-import { Node, DOMSerializer, Fragment, Mark } from "prosemirror-model";
+import { Node, DOMSerializer, Fragment } from "prosemirror-model";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 import styled, { ServerStyleSheet, ThemeProvider } from "styled-components";
 import { prosemirrorToYDoc } from "y-prosemirror";
 import * as Y from "yjs";
 import EditorContainer from "@shared/editor/components/Styles";
-import embeds from "@shared/editor/embeds";
 import GlobalStyles from "@shared/styles/globals";
 import light from "@shared/styles/theme";
-import { ProsemirrorData } from "@shared/types";
+import { MentionType, ProsemirrorData, UnfurlResponse } from "@shared/types";
 import { attachmentRedirectRegex } from "@shared/utils/ProsemirrorHelper";
+import parseDocumentSlug from "@shared/utils/parseDocumentSlug";
 import { isRTL } from "@shared/utils/rtl";
 import { isInternalUrl } from "@shared/utils/urls";
 import { schema, parser } from "@server/editor";
@@ -37,11 +37,13 @@ export type HTMLOptions = {
 };
 
 export type MentionAttrs = {
-  type: string;
+  type: MentionType;
   label: string;
   modelId: string;
   actorId: string | undefined;
   id: string;
+  href?: string;
+  unfurl?: UnfurlResponse[keyof UnfurlResponse];
 };
 
 @trace()
@@ -60,49 +62,7 @@ export class ProsemirrorHelper {
       );
     }
 
-    let node = parser.parse(input);
-
-    // in the editor embeds are created at runtime by converting links into
-    // embeds where they match.Because we're converting to a CRDT structure on
-    //  the server we need to mimic this behavior.
-    function urlsToEmbeds(node: Node): Node {
-      if (node.type.name === "paragraph") {
-        // @ts-expect-error content
-        for (const textNode of node.content.content) {
-          for (const embed of embeds) {
-            if (
-              textNode.text &&
-              textNode.marks.some(
-                (m: Mark) =>
-                  m.type.name === "link" && m.attrs.href === textNode.text
-              ) &&
-              embed.matcher(textNode.text)
-            ) {
-              return schema.nodes.embed.createAndFill({
-                href: textNode.text,
-              }) as Node;
-            }
-          }
-        }
-      }
-
-      if (node.content) {
-        const contentAsArray =
-          node.content instanceof Fragment
-            ? // @ts-expect-error content
-              node.content.content
-            : node.content;
-        // @ts-expect-error content
-        node.content = Fragment.fromArray(contentAsArray.map(urlsToEmbeds));
-      }
-
-      return node;
-    }
-
-    if (node) {
-      node = urlsToEmbeds(node);
-    }
-
+    const node = parser.parse(input);
     return node ? prosemirrorToYDoc(node, fieldName) : new Y.Doc();
   }
 
@@ -119,10 +79,13 @@ export class ProsemirrorHelper {
   /**
    * Converts a plain object into a Prosemirror Node.
    *
-   * @param data The object to parse
+   * @param data The ProsemirrorData object or string to parse.
    * @returns The content as a Prosemirror Node
    */
-  static toProsemirror(data: ProsemirrorData) {
+  static toProsemirror(data: ProsemirrorData | string) {
+    if (typeof data === "string") {
+      return parser.parse(data);
+    }
     return Node.fromJSON(schema, data);
   }
 
@@ -168,6 +131,50 @@ export class ProsemirrorHelper {
   }
 
   /**
+   * Returns an array of document IDs referenced through links or mentions in the node.
+   *
+   * @param node The node to parse document IDs from
+   * @returns An array of document IDs
+   */
+  static parseDocumentIds(doc: Node) {
+    const identifiers: string[] = [];
+
+    doc.descendants((node: Node) => {
+      if (
+        node.type.name === "mention" &&
+        node.attrs.type === MentionType.Document &&
+        !identifiers.includes(node.attrs.modelId)
+      ) {
+        identifiers.push(node.attrs.modelId);
+        return true;
+      }
+
+      if (node.type.name === "text") {
+        // get marks for text nodes
+        node.marks.forEach((mark) => {
+          // any of the marks identifiers?
+          if (mark.type.name === "link") {
+            const slug = parseDocumentSlug(mark.attrs.href);
+
+            // don't return the same link more than once
+            if (slug && !identifiers.includes(slug)) {
+              identifiers.push(slug);
+            }
+          }
+        });
+      }
+
+      if (!node.content.size) {
+        return false;
+      }
+
+      return true;
+    });
+
+    return identifiers;
+  }
+
+  /**
    * Find the nearest ancestor block node which contains the mention.
    *
    * @param doc The top-level doc node of a document / revision.
@@ -189,7 +196,7 @@ export class ProsemirrorHelper {
       node.descendants((childNode: Node) => {
         if (
           childNode.type.name === "mention" &&
-          isEqual(childNode.attrs, mention)
+          isMatch(childNode.attrs, mention)
         ) {
           foundMention = true;
           return false;

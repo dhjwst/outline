@@ -6,6 +6,7 @@ import JSZip from "jszip";
 import Router from "koa-router";
 import escapeRegExp from "lodash/escapeRegExp";
 import has from "lodash/has";
+import isNil from "lodash/isNil";
 import remove from "lodash/remove";
 import uniq from "lodash/uniq";
 import mime from "mime-types";
@@ -132,15 +133,19 @@ router.post(
     // if a specific collection is passed then we need to check auth to view it
     if (collectionId) {
       where[Op.and].push({ collectionId: [collectionId] });
-      const collection = await Collection.scope({
-        method: ["withMembership", user.id],
-      }).findByPk(collectionId);
+      const collection = await Collection.scope([
+        sort === "index" ? "withDocumentStructure" : "defaultScope",
+        {
+          method: ["withMembership", user.id],
+        },
+      ]).findByPk(collectionId);
+
       authorize(user, "readDocument", collection);
 
       // index sort is special because it uses the order of the documents in the
       // collection.documentStructure rather than a database column
       if (sort === "index") {
-        documentIds = (collection?.documentStructure || [])
+        documentIds = (collection.documentStructure || [])
           .map((node) => node.id)
           .slice(ctx.state.pagination.offset, ctx.state.pagination.limit);
         where[Op.and].push({ id: documentIds });
@@ -267,7 +272,7 @@ router.post(
     }
 
     const [documents, total] = await Promise.all([
-      Document.defaultScopeWithUser(user.id).findAll({
+      Document.withMembershipScope(user.id).findAll({
         where,
         order: [
           [
@@ -347,7 +352,7 @@ router.post(
       };
     }
 
-    const documents = await Document.defaultScopeWithUser(user.id).findAll({
+    const documents = await Document.withMembershipScope(user.id).findAll({
       where,
       order: [
         [
@@ -396,15 +401,11 @@ router.post(
     const membershipScope: Readonly<ScopeOptions> = {
       method: ["withMembership", user.id],
     };
-    const collectionScope: Readonly<ScopeOptions> = {
-      method: ["withCollectionPermissions", user.id],
-    };
     const viewScope: Readonly<ScopeOptions> = {
       method: ["withViews", user.id],
     };
     const documents = await Document.scope([
       membershipScope,
-      collectionScope,
       viewScope,
       "withDrafts",
     ]).findAll({
@@ -538,7 +539,9 @@ router.post(
       delete where.updatedAt;
     }
 
-    const documents = await Document.defaultScopeWithUser(user.id).findAll({
+    const documents = await Document.withMembershipScope(user.id, {
+      includeDrafts: true,
+    }).findAll({
       where,
       order: [[sort, direction]],
       offset: ctx.state.pagination.offset,
@@ -573,12 +576,13 @@ router.post(
       teamId: teamFromCtx?.id,
     });
     const isPublic = cannot(user, "read", document);
-    const serializedDocument = await presentDocument(ctx, document, {
-      isPublic,
-      shareId,
-    });
-
-    const team = await document.$get("team");
+    const [serializedDocument, team] = await Promise.all([
+      presentDocument(ctx, document, {
+        isPublic,
+        shareId,
+      }),
+      teamFromCtx?.id === document.teamId ? teamFromCtx : document.$get("team"),
+    ]);
 
     // Passing apiVersion=2 has a single effect, to change the response payload to
     // include top level keys for document, sharedTree, and team.
@@ -1452,7 +1456,7 @@ router.post(
   auth(),
   validate(T.DocumentsUnpublishSchema),
   async (ctx: APIContext<T.DocumentsUnpublishReq>) => {
-    const { id } = ctx.input.body;
+    const { id, detach } = ctx.input.body;
     const { user } = ctx.state.auth;
 
     const document = await Document.findByPk(id, {
@@ -1471,14 +1475,14 @@ router.post(
       );
     }
 
-    await document.unpublish(user);
+    // detaching would unset collectionId from document, so save a ref to the affected collectionId.
+    const collectionId = document.collectionId;
+
+    await document.unpublish(user, { detach });
     await Event.createFromContext(ctx, {
       name: "documents.unpublish",
       documentId: document.id,
-      collectionId: document.collectionId,
-      data: {
-        title: document.title,
-      },
+      collectionId,
     });
 
     ctx.body = {
@@ -1537,7 +1541,7 @@ router.post(
       acl,
     });
 
-    const job = await DocumentImportTask.schedule({
+    const job = await new DocumentImportTask().schedule({
       key,
       sourceMetadata: {
         fileName,
@@ -1547,6 +1551,7 @@ router.post(
       collectionId,
       parentDocumentId,
       publish,
+      ip: ctx.request.ip,
     });
     const response: DocumentImportTaskResponse = await job.finished();
     if ("error" in response) {
@@ -1573,6 +1578,7 @@ router.post(
   transaction(),
   async (ctx: APIContext<T.DocumentsCreateReq>) => {
     const {
+      id,
       title,
       text,
       icon,
@@ -1640,8 +1646,11 @@ router.post(
     }
 
     const document = await documentCreator({
+      id,
       title,
-      text: await TextHelper.replaceImagesWithAttachments(ctx, text, user),
+      text: !isNil(text)
+        ? await TextHelper.replaceImagesWithAttachments(ctx, text, user)
+        : text,
       icon,
       color,
       createdAt,
@@ -1674,8 +1683,8 @@ router.post(
   rateLimiter(RateLimiterStrategy.OneHundredPerHour),
   transaction(),
   async (ctx: APIContext<T.DocumentsAddUserReq>) => {
-    const { auth, transaction } = ctx.state;
-    const actor = auth.user;
+    const { transaction } = ctx.state;
+    const { user: actor } = ctx.state.auth;
     const { id, userId, permission } = ctx.input.body;
 
     if (userId === actor.id) {
@@ -1728,30 +1737,18 @@ router.post(
         permission: permission || user.defaultDocumentPermission,
         createdById: actor.id,
       },
-      transaction,
       lock: transaction.LOCK.UPDATE,
+      ...ctx.context,
     });
 
-    if (permission) {
+    if (!isNew && permission) {
       membership.permission = permission;
 
       // disconnect from the source if the permission is manually updated
       membership.sourceId = null;
 
-      await membership.save({ transaction });
+      await membership.save(ctx.context);
     }
-
-    await Event.createFromContext(ctx, {
-      name: "documents.add_user",
-      userId,
-      modelId: membership.id,
-      documentId: document.id,
-      data: {
-        title: document.title,
-        isNew,
-        permission: membership.permission,
-      },
-    });
 
     ctx.body = {
       data: {
@@ -1799,14 +1796,7 @@ router.post(
       rejectOnEmpty: true,
     });
 
-    await membership.destroy({ transaction });
-
-    await Event.createFromContext(ctx, {
-      name: "documents.remove_user",
-      userId,
-      modelId: membership.id,
-      documentId: document.id,
-    });
+    await membership.destroy(ctx.context);
 
     ctx.body = {
       success: true,
@@ -1838,7 +1828,7 @@ router.post(
     authorize(user, "update", document);
     authorize(user, "read", group);
 
-    const [membership, isNew] = await GroupMembership.findOrCreate({
+    const [membership, created] = await GroupMembership.findOrCreate({
       where: {
         documentId: id,
         groupId,
@@ -1848,29 +1838,17 @@ router.post(
         createdById: user.id,
       },
       lock: transaction.LOCK.UPDATE,
-      transaction,
+      ...ctx.context,
     });
 
-    if (permission) {
+    if (!created && permission) {
       membership.permission = permission;
 
       // disconnect from the source if the permission is manually updated
       membership.sourceId = null;
 
-      await membership.save({ transaction });
+      await membership.save(ctx.context);
     }
-
-    await Event.createFromContext(ctx, {
-      name: "documents.add_group",
-      documentId: document.id,
-      modelId: groupId,
-      data: {
-        name: group.name,
-        isNew,
-        permission: membership.permission,
-        membershipId: membership.id,
-      },
-    });
 
     ctx.body = {
       data: {
@@ -1914,17 +1892,7 @@ router.post(
       rejectOnEmpty: true,
     });
 
-    await membership.destroy({ transaction });
-
-    await Event.createFromContext(ctx, {
-      name: "documents.remove_group",
-      documentId: document.id,
-      modelId: groupId,
-      data: {
-        name: group.name,
-        membershipId: membership.id,
-      },
-    });
+    await membership.destroy(ctx.context);
 
     ctx.body = {
       success: true,
@@ -2067,13 +2035,7 @@ router.post(
     const collectionIds = await user.collectionIds({
       paranoid: false,
     });
-    const collectionScope: Readonly<ScopeOptions> = {
-      method: ["withCollectionPermissions", user.id],
-    };
-    const documents = await Document.scope([
-      collectionScope,
-      "withDrafts",
-    ]).findAll({
+    const documents = await Document.scope("withDrafts").findAll({
       attributes: ["id"],
       where: {
         deletedAt: {
@@ -2097,7 +2059,7 @@ router.post(
     });
 
     if (documents.length) {
-      await EmptyTrashTask.schedule({
+      await new EmptyTrashTask().schedule({
         documentIds: documents.map((doc) => doc.id),
       });
     }
